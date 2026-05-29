@@ -1,18 +1,6 @@
 use soroban_sdk::{contracttype, Address, String, Vec};
 
-/// Four-tier progress level for a player profile
-#[contracttype]
-#[derive(Clone, Debug, PartialEq)]
-pub enum ProgressLevel {
-    /// Level 0 — profile created, no verification yet
-    Unverified,
-    /// Level 1 — identity confirmed by academy or KYC
-    VerifiedIdentity,
-    /// Level 2 — performance milestones verified by approved third party
-    PerformanceMilestones,
-    /// Level 3 — scout feedback or trial offer logged
-    EliteTier,
-}
+pub use scoutchain_shared_types::ProgressLevel;
 
 /// Basic player vitals stored on-chain
 #[contracttype]
