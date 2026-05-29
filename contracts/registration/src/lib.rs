@@ -58,8 +58,8 @@ impl RegistrationContract {
         vitals: PlayerVitals,
         ipfs_hashes: Vec<String>,
     ) -> Result<u64, ScoutChainError> {
-        Self::require_not_paused(&env)?;
         Self::require_initialized(&env)?;
+        Self::require_not_paused(&env)?;
         wallet.require_auth();
 
         // Prevent duplicate registrations
@@ -84,7 +84,7 @@ impl RegistrationContract {
             return Err(ScoutChainError::InvalidInput);
         }
 
-        let player_id = Self::next_player_id(&env);
+        let player_id = Self::next_player_id(&env)?;
         let now = env.ledger().timestamp();
 
         let profile = PlayerProfile {
@@ -129,6 +129,20 @@ impl RegistrationContract {
         Ok(())
     }
 
+    /// Deregister a player profile (admin only, GDPR right-to-erasure).
+    pub fn deregister_player(env: Env, player_id: u64) -> Result<(), ScoutChainError> {
+        Self::require_admin(&env)?;
+        let profile = Self::load_player(&env, player_id)?;
+        env.storage()
+            .persistent()
+            .remove(&DataKey::Player(player_id));
+        env.storage()
+            .persistent()
+            .remove(&DataKey::PlayerByWallet(profile.wallet));
+        events::player_deregistered(&env, player_id);
+        Ok(())
+    }
+
     // -------------------------------------------------------------------------
     // Scout registration
     // -------------------------------------------------------------------------
@@ -139,8 +153,8 @@ impl RegistrationContract {
         wallet: Address,
         region: String,
     ) -> Result<u64, ScoutChainError> {
-        Self::require_not_paused(&env)?;
         Self::require_initialized(&env)?;
+        Self::require_not_paused(&env)?;
         wallet.require_auth();
 
         if env
@@ -155,7 +169,7 @@ impl RegistrationContract {
             return Err(ScoutChainError::InvalidInput);
         }
 
-        let scout_id = Self::next_scout_id(&env);
+        let scout_id = Self::next_scout_id(&env)?;
         let profile = ScoutProfile {
             scout_id,
             wallet: wallet.clone(),
@@ -199,6 +213,36 @@ impl RegistrationContract {
             .persistent()
             .get(&DataKey::Scout(scout_id))
             .ok_or(ScoutChainError::ScoutNotFound)
+    }
+
+    pub fn get_player_count(env: Env) -> u64 {
+        if !env
+            .storage()
+            .instance()
+            .get::<DataKey, bool>(&DataKey::Initialized)
+            .unwrap_or(false)
+        {
+            return 0;
+        }
+        env.storage()
+            .instance()
+            .get(&DataKey::PlayerCounter)
+            .unwrap_or(0u64)
+    }
+
+    pub fn get_scout_count(env: Env) -> u64 {
+        if !env
+            .storage()
+            .instance()
+            .get::<DataKey, bool>(&DataKey::Initialized)
+            .unwrap_or(false)
+        {
+            return 0;
+        }
+        env.storage()
+            .instance()
+            .get(&DataKey::ScoutCounter)
+            .unwrap_or(0u64)
     }
 
     pub fn health(env: Env) -> bool {
@@ -253,30 +297,30 @@ impl RegistrationContract {
             .ok_or(ScoutChainError::PlayerNotFound)
     }
 
-    fn next_player_id(env: &Env) -> u64 {
+    fn next_player_id(env: &Env) -> Result<u64, ScoutChainError> {
         let id: u64 = env
             .storage()
             .instance()
             .get(&DataKey::PlayerCounter)
             .unwrap_or(0u64);
-        let next = id.checked_add(1).expect("overflow");
+        let next = id.checked_add(1).ok_or(ScoutChainError::Overflow)?;
         env.storage()
             .instance()
             .set(&DataKey::PlayerCounter, &next);
-        next
+        Ok(next)
     }
 
-    fn next_scout_id(env: &Env) -> u64 {
+    fn next_scout_id(env: &Env) -> Result<u64, ScoutChainError> {
         let id: u64 = env
             .storage()
             .instance()
             .get(&DataKey::ScoutCounter)
             .unwrap_or(0u64);
-        let next = id.checked_add(1).expect("overflow");
+        let next = id.checked_add(1).ok_or(ScoutChainError::Overflow)?;
         env.storage()
             .instance()
             .set(&DataKey::ScoutCounter, &next);
-        next
+        Ok(next)
     }
 }
 
@@ -288,6 +332,7 @@ mod tests {
     use super::*;
     use soroban_sdk::{testutils::Address as _, vec, Env, String};
 
+    #[cfg(test)]
     fn setup() -> (Env, RegistrationContractClient<'static>) {
         let env = Env::default();
         env.mock_all_auths();
@@ -296,6 +341,7 @@ mod tests {
         (env, client)
     }
 
+    #[cfg(test)]
     fn dummy_vitals(env: &Env) -> PlayerVitals {
         PlayerVitals {
             age: 18,
@@ -537,5 +583,105 @@ mod tests {
         let exactly_128 = String::from_str(&env, &"A".repeat(128));
         let scout_id = client.register_scout(&wallet, &exactly_128);
         assert_eq!(scout_id, 1);
+    }
+
+    // -------------------------------------------------------------------------
+    // Issue #28: require_initialized before require_not_paused
+    // -------------------------------------------------------------------------
+
+    #[test]
+    #[should_panic(expected = "NotInitialized")]
+    fn test_register_player_uninitialized_returns_not_initialized() {
+        let (env, client) = setup();
+        let wallet = Address::generate(&env);
+        let vitals = dummy_vitals(&env);
+        let hashes = vec![&env, String::from_str(&env, "QmTest")];
+        client.register_player(&wallet, &vitals, &hashes);
+    }
+
+    #[test]
+    #[should_panic(expected = "NotInitialized")]
+    fn test_register_scout_uninitialized_returns_not_initialized() {
+        let (env, client) = setup();
+        let wallet = Address::generate(&env);
+        let region = String::from_str(&env, "Europe");
+        client.register_scout(&wallet, &region);
+    }
+
+    // -------------------------------------------------------------------------
+    // Issue #34: Dual-role wallet policy (player + scout same wallet)
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_same_wallet_can_register_as_player_and_scout() {
+        let (env, client) = setup();
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        let wallet = Address::generate(&env);
+        let vitals = dummy_vitals(&env);
+        let hashes = vec![&env, String::from_str(&env, "QmTest")];
+        let region = String::from_str(&env, "Europe");
+
+        let player_id = client.register_player(&wallet, &vitals, &hashes);
+        assert_eq!(player_id, 1);
+
+        let scout_id = client.register_scout(&wallet, &region);
+        assert_eq!(scout_id, 1);
+
+        let player = client.get_player(&player_id);
+        assert_eq!(player.wallet, wallet);
+
+        let scout = client.get_scout(&scout_id);
+        assert_eq!(scout.wallet, wallet);
+    }
+
+    // -------------------------------------------------------------------------
+    // Issue #26: get_player_count and get_scout_count query functions
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_get_player_count_returns_zero_before_init() {
+        let (env, client) = setup();
+        assert_eq!(client.get_player_count(), 0);
+    }
+
+    #[test]
+    fn test_get_scout_count_returns_zero_before_init() {
+        let (env, client) = setup();
+        assert_eq!(client.get_scout_count(), 0);
+    }
+
+    #[test]
+    fn test_get_player_count_after_registrations() {
+        let (env, client) = setup();
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        let vitals = dummy_vitals(&env);
+        let hashes = vec![&env, String::from_str(&env, "QmTest")];
+
+        for i in 0..3 {
+            let wallet = Address::generate(&env);
+            client.register_player(&wallet, &vitals, &hashes);
+        }
+
+        assert_eq!(client.get_player_count(), 3);
+    }
+
+    #[test]
+    fn test_get_scout_count_after_registrations() {
+        let (env, client) = setup();
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        let region = String::from_str(&env, "Europe");
+
+        for _i in 0..3 {
+            let wallet = Address::generate(&env);
+            client.register_scout(&wallet, &region);
+        }
+
+        assert_eq!(client.get_scout_count(), 3);
     }
 }

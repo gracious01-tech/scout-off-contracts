@@ -1,42 +1,6 @@
 use soroban_sdk::{contracttype, Address};
 
-/// Mirrors the four-tier level in registration — kept in sync manually
-/// (or via a shared crate in a future refactor).
-#[contracttype]
-#[derive(Clone, Debug, PartialEq)]
-pub enum ProgressLevel {
-    Unverified,
-    VerifiedIdentity,
-    PerformanceMilestones,
-    EliteTier,
-}
-
-impl ProgressLevel {
-    /// Returns the next valid [`ProgressLevel`] in the progression sequence,
-    /// or `None` if the player is already at [`ProgressLevel::EliteTier`].
-    ///
-    /// This is the single source of truth for valid level transitions.
-    /// All contract logic that advances a player's level must go through
-    /// this method to ensure consistency.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// # use scoutchain_progress::types::ProgressLevel;
-    /// assert_eq!(ProgressLevel::Unverified.next(), Some(ProgressLevel::VerifiedIdentity));
-    /// assert_eq!(ProgressLevel::VerifiedIdentity.next(), Some(ProgressLevel::PerformanceMilestones));
-    /// assert_eq!(ProgressLevel::PerformanceMilestones.next(), Some(ProgressLevel::EliteTier));
-    /// assert_eq!(ProgressLevel::EliteTier.next(), None);
-    /// ```
-    pub fn next(&self) -> Option<ProgressLevel> {
-        match self {
-            ProgressLevel::Unverified => Some(ProgressLevel::VerifiedIdentity),
-            ProgressLevel::VerifiedIdentity => Some(ProgressLevel::PerformanceMilestones),
-            ProgressLevel::PerformanceMilestones => Some(ProgressLevel::EliteTier),
-            ProgressLevel::EliteTier => None,
-        }
-    }
-}
+pub use scoutchain_shared_types::ProgressLevel;
 
 /// A single entry in the immutable progress history
 #[contracttype]

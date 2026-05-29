@@ -1,5 +1,6 @@
 [workspace]
 members = [
+    "contracts/shared-types",
     "contracts/registration",
     "contracts/verification",
     "contracts/progress",

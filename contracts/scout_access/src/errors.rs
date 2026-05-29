@@ -15,4 +15,5 @@ pub enum ScoutAccessError {
     InvalidTier = 9,
     Overflow = 10,
     TrialOfferNotFound = 11,
+    ProgressCallFailed = 14,
 }

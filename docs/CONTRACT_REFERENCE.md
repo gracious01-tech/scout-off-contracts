@@ -17,8 +17,14 @@ Handles player and scout on-chain identity.
 | `get_player(player_id)` | — | Read player profile |
 | `get_player_by_wallet(wallet)` | — | Lookup player by wallet |
 | `get_scout(scout_id)` | — | Read scout profile |
+| `get_player_count()` | — | Total registered players |
+| `get_scout_count()` | — | Total registered scouts |
 | `pause_contract()` / `unpause_contract()` | admin | Circuit breaker |
 | `health()` | — | Returns true if initialized |
+
+### Dual-Role Wallet Policy
+
+A single wallet address **may register as both a player and a scout**. This is intentional and allowed. A wallet can hold both roles simultaneously without restriction. Duplicate prevention is enforced per role (a wallet cannot register twice as a player, and cannot register twice as a scout), but cross-role registration is permitted.
 
 ---
 

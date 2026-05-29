@@ -1,5 +1,5 @@
 use soroban_sdk::{Address, Env, Symbol};
-use crate::types::ProgressLevel;
+use scoutchain_shared_types::ProgressLevel;
 
 pub fn admin_transferred(env: &Env, old_admin: &Address, new_admin: &Address) {
     env.events().publish(

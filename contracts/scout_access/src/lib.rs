@@ -7,6 +7,10 @@ use types::{DataKey, FeeConfig, Subscription, SubscriptionTier, TrialOffer};
 
 use soroban_sdk::{contract, contractimpl, token, Address, Env, String};
 
+// ~30 days at 5 s/ledger; extend when TTL drops below half that.
+const TRIAL_TTL_THRESHOLD: u32 = 259_200;
+const TRIAL_TTL_EXTEND_TO: u32 = 518_400;
+
 #[contract]
 pub struct ScoutAccessContract;
 
@@ -71,6 +75,16 @@ impl ScoutAccessContract {
         Ok(())
     }
 
+    /// Register the progress contract address so log_trial_offer can
+    /// atomically advance the player to Level 3 (admin only).
+    pub fn set_progress_contract(env: Env, addr: Address) -> Result<(), ScoutAccessError> {
+        Self::require_admin(&env)?;
+        env.storage()
+            .instance()
+            .set(&DataKey::ProgressContract, &addr);
+        Ok(())
+    }
+
     // -------------------------------------------------------------------------
     // Scout subscription
     // -------------------------------------------------------------------------
@@ -109,6 +123,9 @@ impl ScoutAccessContract {
         env.storage()
             .persistent()
             .set(&DataKey::Subscription(scout.clone()), &sub);
+        env.storage()
+            .persistent()
+            .extend_ttl(&DataKey::Subscription(scout.clone()), PERSISTENT_TTL_MIN, PERSISTENT_TTL_MAX);
 
         events::scout_subscribed(&env, &scout, &tier);
         Ok(())
@@ -145,6 +162,12 @@ impl ScoutAccessContract {
         Self::accumulate_fee(&env, config.contact_fee_stroops);
 
         env.storage().persistent().set(&contact_key, &true);
+        env.storage()
+            .persistent()
+            .extend_ttl(&contact_key, PERSISTENT_TTL_MIN, PERSISTENT_TTL_MAX);
+        env.storage()
+            .persistent()
+            .extend_ttl(&DataKey::Subscription(scout.clone()), PERSISTENT_TTL_MIN, PERSISTENT_TTL_MAX);
         events::player_contacted(&env, player_id, &scout);
         Ok(())
     }
@@ -168,6 +191,9 @@ impl ScoutAccessContract {
         if sub.tier != SubscriptionTier::Elite {
             return Err(ScoutAccessError::Unauthorized);
         }
+        env.storage()
+            .persistent()
+            .extend_ttl(&DataKey::Subscription(scout.clone()), PERSISTENT_TTL_MIN, PERSISTENT_TTL_MAX);
 
         let counter_key = DataKey::TrialCounter(player_id);
         let index: u32 = env
@@ -187,9 +213,32 @@ impl ScoutAccessContract {
         env.storage()
             .persistent()
             .set(&DataKey::TrialOffer(player_id, next_index), &offer);
+        env.storage()
+            .persistent()
+            .extend_ttl(&DataKey::TrialOffer(player_id, next_index), TRIAL_TTL_THRESHOLD, TRIAL_TTL_EXTEND_TO);
         env.storage().persistent().set(&counter_key, &next_index);
+        env.storage()
+            .persistent()
+            .extend_ttl(&counter_key, TRIAL_TTL_THRESHOLD, TRIAL_TTL_EXTEND_TO);
 
         events::trial_offer_logged(&env, player_id, &scout);
+
+        // Atomically advance the player to Level 3 if the progress contract
+        // is configured. AlreadyAtMaxLevel is silently ignored; any other
+        // failure is a hard error.
+        if let Some(progress_addr) = env
+            .storage()
+            .instance()
+            .get::<DataKey, Address>(&DataKey::ProgressContract)
+        {
+            let progress_client = progress_contract::Client::new(&env, &progress_addr);
+            match progress_client.try_advance_level(&scout, &player_id, &next_index) {
+                Ok(_) => {}
+                Err(Ok(progress_contract::Error::AlreadyAtMaxLevel)) => {}
+                Err(_) => return Err(ScoutAccessError::ProgressCallFailed),
+            }
+        }
+
         Ok(next_index)
     }
 
@@ -201,10 +250,15 @@ impl ScoutAccessContract {
         env: Env,
         scout: Address,
     ) -> Result<Subscription, ScoutAccessError> {
+        let sub = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Subscription(scout.clone()))
+            .ok_or(ScoutAccessError::ScoutNotSubscribed)?;
         env.storage()
             .persistent()
-            .get(&DataKey::Subscription(scout))
-            .ok_or(ScoutAccessError::ScoutNotSubscribed)
+            .extend_ttl(&DataKey::Subscription(scout), PERSISTENT_TTL_MIN, PERSISTENT_TTL_MAX);
+        Ok(sub)
     }
 
     pub fn get_fee_config(env: Env) -> FeeConfig {
@@ -219,9 +273,14 @@ impl ScoutAccessContract {
     }
 
     pub fn has_contacted(env: Env, scout: Address, player_id: u64) -> bool {
-        env.storage()
-            .persistent()
-            .has(&DataKey::ContactRecord(player_id, scout))
+        let key = DataKey::ContactRecord(player_id, scout);
+        let exists = env.storage().persistent().has(&key);
+        if exists {
+            env.storage()
+                .persistent()
+                .extend_ttl(&key, PERSISTENT_TTL_MIN, PERSISTENT_TTL_MAX);
+        }
+        exists
     }
 
     pub fn get_trial_offer(
@@ -229,17 +288,29 @@ impl ScoutAccessContract {
         player_id: u64,
         index: u32,
     ) -> Result<TrialOffer, ScoutAccessError> {
-        env.storage()
+        let offer = env
+            .storage()
             .persistent()
             .get(&DataKey::TrialOffer(player_id, index))
-            .ok_or(ScoutAccessError::TrialOfferNotFound)
+            .ok_or(ScoutAccessError::TrialOfferNotFound)?;
+        env.storage()
+            .persistent()
+            .extend_ttl(&DataKey::TrialOffer(player_id, index), TRIAL_TTL_THRESHOLD, TRIAL_TTL_EXTEND_TO);
+        Ok(offer)
     }
 
     pub fn get_trial_count(env: Env, player_id: u64) -> u32 {
-        env.storage()
+        let count = env
+            .storage()
             .persistent()
             .get(&DataKey::TrialCounter(player_id))
-            .unwrap_or(0u32)
+            .unwrap_or(0u32);
+        if count > 0 {
+            env.storage()
+                .persistent()
+                .extend_ttl(&DataKey::TrialCounter(player_id), TRIAL_TTL_THRESHOLD, TRIAL_TTL_EXTEND_TO);
+        }
+        count
     }
 
     pub fn health(env: Env) -> bool {
@@ -440,6 +511,37 @@ mod tests {
     }
 
     #[test]
+    fn test_trial_offer_ttl_extended_after_ledger_advance() {
+        let (env, admin, xlm, contract_id, client) = setup();
+
+        // Start at a known ledger sequence so TTL arithmetic is predictable.
+        env.ledger().with_mut(|l| {
+            l.sequence_number = 100_000;
+            l.min_persistent_entry_ttl = 500;
+            l.max_entry_ttl = 600_000;
+        });
+
+        let scout = Address::generate(&env);
+        mint_token(&env, &xlm, &admin, &scout, 100_000_000);
+        client.subscribe(&scout, &SubscriptionTier::Elite);
+
+        // log_trial_offer stores the entry and immediately calls extend_ttl
+        // with TRIAL_TTL_EXTEND_TO (518_400 ledgers).
+        client.log_trial_offer(&scout, &1u64, &String::from_str(&env, "QmTTLTest"));
+
+        // Advance the ledger well past the default min_persistent_entry_ttl (500)
+        // but within TRIAL_TTL_EXTEND_TO (518_400). The entry must still be live.
+        env.ledger().with_mut(|l| {
+            l.sequence_number = 100_000 + 1_000;
+        });
+
+        // Both the offer and the counter must still be accessible.
+        let offer = client.get_trial_offer(&1u64, &1u32);
+        assert_eq!(offer.player_id, 1);
+        assert_eq!(client.get_trial_count(&1u64), 1);
+    }
+
+    #[test]
     #[should_panic]
     fn test_trial_offer_requires_elite() {
         let (env, admin, xlm, contract_id, client) = setup();
@@ -448,6 +550,18 @@ mod tests {
 
         // Pro tier — not allowed to log trial offers
         client.subscribe(&scout, &SubscriptionTier::Pro);
+        client.log_trial_offer(&scout, &1u64, &String::from_str(&env, "QmDetails"));
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_trial_offer_rejected_for_basic_tier() {
+        let (env, admin, xlm, contract_id, client) = setup();
+        let scout = Address::generate(&env);
+        mint_token(&env, &xlm, &admin, &scout, 100_000_000);
+
+        // Basic tier — not allowed to log trial offers
+        client.subscribe(&scout, &SubscriptionTier::Basic);
         client.log_trial_offer(&scout, &1u64, &String::from_str(&env, "QmDetails"));
     }
 
@@ -474,5 +588,32 @@ mod tests {
 
         // Should panic with SubscriptionExpired
         client.pay_to_contact(&scout, &1u64);
+    }
+
+    #[test]
+    fn test_subscription_ttl_extended_after_ledger_advance() {
+        let (env, admin, xlm, _contract_id, client) = setup();
+
+        env.ledger().with_mut(|l| {
+            l.sequence_number = 100_000;
+            l.min_persistent_entry_ttl = 200;
+            l.max_entry_ttl = 10_000;
+        });
+
+        let scout = Address::generate(&env);
+        mint_token(&env, &xlm, &admin, &scout, 10_000_000);
+
+        // subscribe writes the entry and extends TTL to PERSISTENT_TTL_MAX (2000).
+        client.subscribe(&scout, &SubscriptionTier::Basic);
+
+        // Advance past the default min_persistent_entry_ttl (200) but within
+        // PERSISTENT_TTL_MAX (2000) — the entry must still be live.
+        env.ledger().with_mut(|l| {
+            l.sequence_number = 100_000 + 500;
+        });
+
+        // get_subscription must succeed and re-extend the TTL.
+        let sub = client.get_subscription(&scout);
+        assert_eq!(sub.tier, SubscriptionTier::Basic);
     }
 }

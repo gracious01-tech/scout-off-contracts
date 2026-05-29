@@ -516,4 +516,15 @@ mod tests {
             &String::from_str(&env, "QmHash"),
         );
     }
+
+    #[test]
+    #[should_panic]
+    fn test_get_validator_not_found() {
+        let (env, client) = setup();
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        let unknown = Address::generate(&env);
+        client.get_validator(&unknown);
+    }
 }
