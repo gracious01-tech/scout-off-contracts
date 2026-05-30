@@ -36,17 +36,25 @@ pub struct ScoutProfile {
     pub registered_at: u64,
 }
 
-/// Storage keys
+/// Storage keys for contract state
 #[contracttype]
 pub enum DataKey {
+    /// Admin wallet address authorized to manage validators and fees
     Admin,
+    /// Boolean flag indicating if contract has been initialized
     Initialized,
+    /// Boolean flag indicating if contract is paused (circuit breaker)
     Paused,
+    /// Counter for generating unique player IDs
     PlayerCounter,
+    /// Counter for generating unique scout IDs
     ScoutCounter,
+    /// Full player profile stored by player_id
     Player(u64),
-    /// Index: wallet → player_id
+    /// Index mapping player wallet address to player_id for fast lookup
     PlayerByWallet(Address),
+    /// Full scout profile stored by scout_id
     Scout(u64),
+    /// Index mapping scout wallet address to scout_id for fast lookup
     ScoutByWallet(Address),
 }
