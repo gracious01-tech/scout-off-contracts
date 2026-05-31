@@ -143,7 +143,7 @@ impl ScoutAccessContract {
             tier: tier.clone(),
             expires_at: now
                 .checked_add(config.sub_duration_secs)
-                .expect("overflow"),
+                .ok_or(ScoutAccessError::Overflow)?,
             subscribed_at: now,
         };
         env.storage()
@@ -239,7 +239,7 @@ impl ScoutAccessContract {
             .persistent()
             .get(&counter_key)
             .unwrap_or(0u32);
-        let next_index = index.checked_add(1).expect("overflow");
+        let next_index = index.checked_add(1).ok_or(ScoutAccessError::Overflow)?;
 
         let offer = TrialOffer {
             player_id,
@@ -695,5 +695,27 @@ mod tests {
 
         // player_id 1 does not exist → should panic with PlayerNotFound.
         client.pay_to_contact(&scout, &1u64);
+    }
+
+    #[test]
+    fn test_log_trial_offer_overflow_returns_error() {
+        let (env, admin, xlm, _contract_id, client) = setup();
+        let scout = Address::generate(&env);
+        mint_token(&env, &xlm, &admin, &scout, 100_000_000);
+        client.subscribe(&scout, &SubscriptionTier::Elite);
+
+        // Seed the trial counter at u32::MAX so the next increment overflows.
+        env.as_contract(&_contract_id, || {
+            env.storage()
+                .persistent()
+                .set(&DataKey::TrialCounter(1u64), &u32::MAX);
+        });
+
+        let result = client.try_log_trial_offer(
+            &scout,
+            &1u64,
+            &String::from_str(&env, "QmOverflow"),
+        );
+        assert_eq!(result, Err(Ok(ScoutAccessError::Overflow)));
     }
 }
