@@ -64,9 +64,9 @@ Maintains the tamper-proof four-tier level state machine.
 |----------|------|-------------|
 | `initialize(admin)` | admin | One-time setup |
 | `advance_level(caller, player_id, milestone_ref)` | caller (validator or scout) | Move player up one level |
-| `get_level(player_id)` | — | Current progress level |
+| `get_level(player_id)` | — | Current progress level; returns `PlayerNotFound` if player is not registered |
 | `get_history_count(player_id)` | — | Number of level changes |
-| `get_history_entry(player_id, index)` | — | Specific history entry |
+| `get_history_entry(player_id, index)` | — | Specific history entry (`ProgressEntry` includes `ledger_sequence: u32` for tamper-proof auditability) |
 | `pause_contract()` / `unpause_contract()` | admin | Circuit breaker |
 | `health()` | — | Returns true if initialized |
 
@@ -114,7 +114,7 @@ Handles scout subscriptions, pay-to-contact, and trial offer logging.
 | `scout_registered` | registration | New scout profile created |
 | `profile_updated` | registration | Player updates IPFS content hashes |
 | `milestone_approved` | verification | Validator confirms a player achievement |
-| `progress_updated` | progress | Player advances to a new level |
+| `progress_updated` | progress | Player advances to a new level (data: `player_id`, `new_level`, `milestone_ref`) |
 | `scout_subscribed` | scout_access | Scout purchases a subscription |
 | `player_contacted` | scout_access | Scout pays to unlock player contact |
 | `trial_offer_logged` | scout_access | Scout records a trial offer |

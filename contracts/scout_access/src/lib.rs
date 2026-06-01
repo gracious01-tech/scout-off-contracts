@@ -117,7 +117,7 @@ impl ScoutAccessContract {
             tier: tier.clone(),
             expires_at: now
                 .checked_add(config.sub_duration_secs)
-                .expect("overflow"),
+                .ok_or(ScoutAccessError::Overflow)?,
             subscribed_at: now,
         };
         env.storage()
@@ -201,7 +201,7 @@ impl ScoutAccessContract {
             .persistent()
             .get(&counter_key)
             .unwrap_or(0u32);
-        let next_index = index.checked_add(1).expect("overflow");
+        let next_index = index.checked_add(1).ok_or(ScoutAccessError::Overflow)?;
 
         let offer = TrialOffer {
             player_id,

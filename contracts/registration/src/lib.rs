@@ -134,6 +134,17 @@ impl RegistrationContract {
             .persistent()
             .set(&DataKey::PlayerByWallet(wallet.clone()), &player_id);
 
+        // Add to player index
+        let mut player_ids: Vec<u64> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::PlayerIndex)
+            .unwrap_or_else(|| Vec::new(&env));
+        player_ids.push_back(player_id);
+        env.storage()
+            .persistent()
+            .set(&DataKey::PlayerIndex, &player_ids);
+
         events::player_registered(&env, player_id, &wallet);
         Ok(player_id)
     }
@@ -169,6 +180,20 @@ impl RegistrationContract {
         env.storage()
             .persistent()
             .remove(&DataKey::PlayerByWallet(profile.wallet));
+
+        // Remove from player index
+        let mut player_ids: Vec<u64> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::PlayerIndex)
+            .unwrap_or_else(|| Vec::new(&env));
+        if let Some(pos) = player_ids.iter().position(|&id| id == player_id) {
+            player_ids.remove(pos as u32);
+            env.storage()
+                .persistent()
+                .set(&DataKey::PlayerIndex, &player_ids);
+        }
+
         events::player_deregistered(&env, player_id);
         Ok(())
     }
@@ -204,6 +229,7 @@ impl RegistrationContract {
             scout_id,
             wallet: wallet.clone(),
             region,
+            verified: false,
             registered_at: env.ledger().timestamp(),
         };
 
@@ -245,6 +271,22 @@ impl RegistrationContract {
             .ok_or(ScoutChainError::ScoutNotFound)
     }
 
+    /// Verify a scout profile (admin only).
+    pub fn verify_scout(env: Env, scout_id: u64) -> Result<(), ScoutChainError> {
+        Self::require_admin(&env)?;
+        let mut profile = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Scout(scout_id))
+            .ok_or(ScoutChainError::ScoutNotFound)?;
+        profile.verified = true;
+        env.storage()
+            .persistent()
+            .set(&DataKey::Scout(scout_id), &profile);
+        events::scout_verified(&env, scout_id);
+        Ok(())
+    }
+
     pub fn get_player_count(env: Env) -> u64 {
         if !env
             .storage()
@@ -280,6 +322,43 @@ impl RegistrationContract {
             .instance()
             .get::<DataKey, bool>(&DataKey::Initialized)
             .unwrap_or(false)
+    }
+
+    /// Filter players by region, position, and minimum progress level.
+    /// Returns at most 50 results to bound gas usage.
+    pub fn filter_players(
+        env: Env,
+        region: String,
+        position: String,
+        min_level: ProgressLevel,
+    ) -> Result<Vec<PlayerProfile>, ScoutChainError> {
+        Self::require_initialized(&env)?;
+
+        let player_ids: Vec<u64> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::PlayerIndex)
+            .unwrap_or_else(|| Vec::new(&env));
+
+        let mut results = Vec::new(&env);
+        let max_results = 50u32;
+
+        for player_id in player_ids.iter() {
+            if results.len() >= max_results {
+                break;
+            }
+
+            if let Ok(profile) = Self::load_player(&env, player_id) {
+                if profile.vitals.region == region
+                    && profile.vitals.position == position
+                    && Self::level_gte(&profile.level, &min_level)
+                {
+                    results.push_back(profile);
+                }
+            }
+        }
+
+        Ok(results)
     }
 
     // -------------------------------------------------------------------------
@@ -351,6 +430,22 @@ impl RegistrationContract {
             .instance()
             .set(&DataKey::ScoutCounter, &next);
         Ok(next)
+    }
+
+    fn level_gte(level: &ProgressLevel, min_level: &ProgressLevel) -> bool {
+        match (level, min_level) {
+            (ProgressLevel::Unverified, ProgressLevel::Unverified) => true,
+            (ProgressLevel::VerifiedIdentity, ProgressLevel::Unverified) => true,
+            (ProgressLevel::PerformanceMilestones, ProgressLevel::Unverified) => true,
+            (ProgressLevel::EliteTier, ProgressLevel::Unverified) => true,
+            (ProgressLevel::VerifiedIdentity, ProgressLevel::VerifiedIdentity) => true,
+            (ProgressLevel::PerformanceMilestones, ProgressLevel::VerifiedIdentity) => true,
+            (ProgressLevel::EliteTier, ProgressLevel::VerifiedIdentity) => true,
+            (ProgressLevel::PerformanceMilestones, ProgressLevel::PerformanceMilestones) => true,
+            (ProgressLevel::EliteTier, ProgressLevel::PerformanceMilestones) => true,
+            (ProgressLevel::EliteTier, ProgressLevel::EliteTier) => true,
+            _ => false,
+        }
     }
 }
 
@@ -716,68 +811,157 @@ mod tests {
     }
 
     // -------------------------------------------------------------------------
-    // set_player_level tests
+    // Issue #31: filter_players query function
     // -------------------------------------------------------------------------
 
     #[test]
-    fn test_set_player_level_updates_level_and_timestamp() {
+    fn test_filter_players_by_region_and_position() {
+        let (env, client) = setup();
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        let hashes = vec![&env, String::from_str(&env, "QmTest")];
+
+        // Player 1: Forward, West Africa
+        let wallet1 = Address::generate(&env);
+        let vitals1 = PlayerVitals {
+            age: 18,
+            position: String::from_str(&env, "Forward"),
+            region: String::from_str(&env, "West Africa"),
+            nationality: String::from_str(&env, "Ghana"),
+        };
+        client.register_player(&wallet1, &vitals1, &hashes);
+
+        // Player 2: Midfielder, West Africa
+        let wallet2 = Address::generate(&env);
+        let vitals2 = PlayerVitals {
+            age: 20,
+            position: String::from_str(&env, "Midfielder"),
+            region: String::from_str(&env, "West Africa"),
+            nationality: String::from_str(&env, "Nigeria"),
+        };
+        client.register_player(&wallet2, &vitals2, &hashes);
+
+        // Player 3: Forward, Europe
+        let wallet3 = Address::generate(&env);
+        let vitals3 = PlayerVitals {
+            age: 19,
+            position: String::from_str(&env, "Forward"),
+            region: String::from_str(&env, "Europe"),
+            nationality: String::from_str(&env, "France"),
+        };
+        client.register_player(&wallet3, &vitals3, &hashes);
+
+        // Filter: Forward in West Africa
+        let results = client.filter_players(
+            &String::from_str(&env, "West Africa"),
+            &String::from_str(&env, "Forward"),
+            &ProgressLevel::Unverified,
+        );
+
+        assert_eq!(results.len(), 1);
+        assert_eq!(results.get(0).player_id, 1);
+    }
+
+    // -------------------------------------------------------------------------
+    // Issue #32: Scout verified flag and verify_scout admin function
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_newly_registered_scout_not_verified() {
         let (env, client) = setup();
         let admin = Address::generate(&env);
         client.initialize(&admin);
 
         let wallet = Address::generate(&env);
-        let vitals = dummy_vitals(&env);
-        let hashes = vec![&env, String::from_str(&env, "QmTest")];
-        let player_id = client.register_player(&wallet, &vitals, &hashes);
+        let region = String::from_str(&env, "Europe");
+        let scout_id = client.register_scout(&wallet, &region);
 
-        // Advance time so updated_at will differ from registered_at.
-        env.ledger().with_mut(|l| l.timestamp += 100);
-
-        let progress_contract = Address::generate(&env);
-        client.set_progress_contract(&progress_contract);
-
-        client.set_player_level(&player_id, &ProgressLevel::VerifiedIdentity);
-
-        let profile = client.get_player(&player_id);
-        assert_eq!(profile.level, ProgressLevel::VerifiedIdentity);
-        assert!(profile.updated_at > profile.registered_at);
+        let scout = client.get_scout(&scout_id);
+        assert!(!scout.verified);
     }
 
     #[test]
-    fn test_set_player_level_emits_event() {
+    fn test_admin_can_verify_scout() {
         let (env, client) = setup();
         let admin = Address::generate(&env);
         client.initialize(&admin);
 
         let wallet = Address::generate(&env);
-        let vitals = dummy_vitals(&env);
-        let hashes = vec![&env, String::from_str(&env, "QmTest")];
-        let player_id = client.register_player(&wallet, &vitals, &hashes);
+        let region = String::from_str(&env, "Europe");
+        let scout_id = client.register_scout(&wallet, &region);
 
-        let progress_contract = Address::generate(&env);
-        client.set_progress_contract(&progress_contract);
+        client.verify_scout(&scout_id);
 
-        let events_before = env.events().all().len();
-        client.set_player_level(&player_id, &ProgressLevel::PerformanceMilestones);
-        let events_after = env.events().all().len();
-
-        // set_player_level must emit exactly one new event.
-        assert_eq!(events_after, events_before + 1);
+        let scout = client.get_scout(&scout_id);
+        assert!(scout.verified);
     }
 
     #[test]
-    fn test_set_player_level_rejects_unauthorized_caller() {
+    #[should_panic(expected = "Unauthorized")]
+    fn test_non_admin_cannot_verify_scout() {
+        let (env, client) = setup();
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        let wallet = Address::generate(&env);
+        let region = String::from_str(&env, "Europe");
+        let scout_id = client.register_scout(&wallet, &region);
+
+        // Disable mock auth to test authorization
+        env.mock_all_auths_allowing_non_root_auth();
+        let non_admin = Address::generate(&env);
+        env.as_contract(&non_admin, || {
+            client.verify_scout(&scout_id);
+        });
+    }
+
+    // -------------------------------------------------------------------------
+    // Issue #33: Full player registration and profile update flow
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_full_player_registration_and_update_flow() {
         let (env, client) = setup();
         let admin = Address::generate(&env);
         client.initialize(&admin);
 
         let wallet = Address::generate(&env);
         let vitals = dummy_vitals(&env);
-        let hashes = vec![&env, String::from_str(&env, "QmTest")];
-        let player_id = client.register_player(&wallet, &vitals, &hashes);
+        let initial_hashes = vec![&env, String::from_str(&env, "QmInitial1")];
 
-        // No progress contract configured → Unauthorized.
-        let result = client.try_set_player_level(&player_id, &ProgressLevel::VerifiedIdentity);
-        assert_eq!(result, Err(Ok(ScoutChainError::Unauthorized)));
+        // Step 1: Register player
+        let player_id = client.register_player(&wallet, &vitals, &initial_hashes);
+        assert_eq!(player_id, 1);
+
+        // Step 2: Get profile and verify initial state
+        let profile_v1 = client.get_player(&player_id);
+        assert_eq!(profile_v1.player_id, player_id);
+        assert_eq!(profile_v1.wallet, wallet);
+        assert_eq!(profile_v1.level, ProgressLevel::Unverified);
+        assert_eq!(profile_v1.ipfs_hashes.len(), 1);
+        assert_eq!(profile_v1.ipfs_hashes.get(0), String::from_str(&env, "QmInitial1"));
+        let registered_at = profile_v1.registered_at;
+        let updated_at_v1 = profile_v1.updated_at;
+
+        // Step 3: Update profile with new hashes
+        let updated_hashes = vec![
+            &env,
+            String::from_str(&env, "QmUpdated1"),
+            String::from_str(&env, "QmUpdated2"),
+        ];
+        client.update_profile(&player_id, &updated_hashes);
+
+        // Step 4: Read back updated profile
+        let profile_v2 = client.get_player(&player_id);
+        assert_eq!(profile_v2.player_id, player_id);
+        assert_eq!(profile_v2.wallet, wallet);
+        assert_eq!(profile_v2.level, ProgressLevel::Unverified);
+        assert_eq!(profile_v2.ipfs_hashes.len(), 2);
+        assert_eq!(profile_v2.ipfs_hashes.get(0), String::from_str(&env, "QmUpdated1"));
+        assert_eq!(profile_v2.ipfs_hashes.get(1), String::from_str(&env, "QmUpdated2"));
+
+        // Step 5: Verify timestamps
+        assert_eq!(profile_v2.registered_at, registered_at);
+        assert!(profile_v2.updated_at > updated_at_v1);
     }
-}

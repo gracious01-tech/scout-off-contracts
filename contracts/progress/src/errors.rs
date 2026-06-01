@@ -18,4 +18,6 @@ pub enum ProgressError {
     AlreadyAtMaxLevel = 6,
     /// No progress record exists for the given player ID.
     PlayerNotFound = 7,
+    /// History counter overflowed the maximum u32 value.
+    Overflow = 8,
 }

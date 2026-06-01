@@ -14,6 +14,8 @@ pub struct ProgressEntry {
     pub updated_at: u64,
     /// Milestone index from the verification contract that triggered this
     pub milestone_ref: u32,
+    /// Ledger sequence number at the time of the level change
+    pub ledger_sequence: u32,
 }
 
 #[contracttype]

@@ -1,5 +1,5 @@
-use soroban_sdk::{Address, Env, Symbol};
 use scoutchain_shared_types::ProgressLevel;
+use soroban_sdk::{Address, Env, Symbol};
 
 pub fn admin_transferred(env: &Env, old_admin: &Address, new_admin: &Address) {
     env.events().publish(
@@ -13,12 +13,22 @@ pub fn progress_updated(
     player_id: u64,
     new_level: &ProgressLevel,
     updated_by: &Address,
+    milestone_ref: u32,
 ) {
     env.events().publish(
-        (
-            Symbol::new(env, "progress_updated"),
-            updated_by.clone(),
-        ),
+        (Symbol::new(env, "progress_updated"), updated_by.clone()),
         (player_id, new_level.clone()),
+    );
+}
+
+pub fn player_level_reset(
+    env: &Env,
+    player_id: u64,
+    old_level: &ProgressLevel,
+    target_level: &ProgressLevel,
+) {
+    env.events().publish(
+        (Symbol::new(env, "player_level_reset"),),
+        (player_id, old_level.clone(), target_level.clone()),
     );
 }
